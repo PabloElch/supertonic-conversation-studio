@@ -7,122 +7,287 @@ import numpy as np
 import streamlit as st
 from supertonic import TTS
 
+SAMPLE_RATE = 44100
+
 st.set_page_config(
     page_title="Supertonic Conversation Studio",
     page_icon="🎙️",
-    layout="centered",
+    layout="wide",
 )
 
-st.title("🎙️ Conversation Studio")
-st.caption("Turn a written dialogue into one audio file.")
+st.title("🎙️ Supertonic Conversation Studio")
+st.caption("Choose voices, preview them, and generate one complete conversation.")
 
-DEFAULT_SCRIPT = """A: Hey! How are you today?
-B: I'm doing great, thanks for asking.
-A: What are you working on?
-B: I'm learning something new."""
+# Voice labels describe preset IDs, not verified personality traits.
+VOICE_OPTIONS = {
+    f"Male voice {i} (M{i})": f"M{i}" for i in range(1, 6)
+}
+VOICE_OPTIONS.update({
+    f"Female voice {i} (F{i})": f"F{i}" for i in range(1, 6)
+})
 
-with st.sidebar:
-    st.header("Voice settings")
-    voice_a = st.selectbox("Speaker A", ["F1", "F2", "F3", "F4", "F5", "M1", "M2", "M3", "M4", "M5"], index=5)
-    voice_b = st.selectbox("Speaker B", ["F1", "F2", "F3", "F4", "F5", "M1", "M2", "M3", "M4", "M5"], index=0)
-    language = st.selectbox(
-        "Language",
-        ["en", "am", "ar", "fr", "de", "es", "hi", "it", "ja", "ko", "pt", "ru", "tr", "zh", "na"],
-        index=0,
-    )
-    speed = st.slider("Speaking speed", 0.7, 1.5, 1.0, 0.05)
-    pause = st.slider("Pause between turns (seconds)", 0.0, 1.5, 0.3, 0.1)
+LANGUAGES = {
+    "English": "en",
+    "Arabic": "ar",
+    "Bulgarian": "bg",
+    "Czech": "cs",
+    "Danish": "da",
+    "German": "de",
+    "Greek": "el",
+    "Spanish": "es",
+    "Estonian": "et",
+    "Finnish": "fi",
+    "French": "fr",
+    "Hindi": "hi",
+    "Croatian": "hr",
+    "Hungarian": "hu",
+    "Indonesian": "id",
+    "Italian": "it",
+    "Japanese": "ja",
+    "Korean": "ko",
+    "Lithuanian": "lt",
+    "Latvian": "lv",
+    "Dutch": "nl",
+    "Polish": "pl",
+    "Portuguese": "pt",
+    "Romanian": "ro",
+    "Russian": "ru",
+    "Slovak": "sk",
+    "Slovenian": "sl",
+    "Swedish": "sv",
+    "Turkish": "tr",
+    "Ukrainian": "uk",
+    "Vietnamese": "vi",
+    "Unknown / fallback": "na",
+}
 
-script = st.text_area(
-    "Conversation script",
-    value=DEFAULT_SCRIPT,
-    height=260,
-    help="Put each speaker turn on a new line, beginning with A: or B:.",
-)
+DEFAULT_SCRIPT = """A: Hey! Welcome to our conversation.
+B: Thanks! I'm happy to be here.
+A: What are you learning today?
+B: I'm learning how to create natural-sounding AI voices."""
 
-st.info("Example format: A: Hello!  (new line) B: Hi there!")
-
-def parse_script(text):
-    turns = []
-    for line_number, line in enumerate(text.splitlines(), start=1):
-        line = line.strip()
-        if not line:
-            continue
-        match = re.match(r"^([AB])\s*:\s*(.+)$", line, flags=re.IGNORECASE)
-        if not match:
-            raise ValueError(
-                f"Line {line_number} must start with A: or B: and contain text."
-            )
-        speaker, words = match.groups()
-        turns.append((speaker.upper(), words.strip()))
-    if not turns:
-        raise ValueError("Please enter at least one conversation turn.")
-    return turns
-
-@st.cache_resource(show_spinner="Loading Supertonic 3 model...")
+@st.cache_resource(show_spinner="Loading Supertonic 3 (first load downloads the model)...")
 def load_tts():
     return TTS(auto_download=True)
 
-def wav_bytes(audio, sample_rate=44100):
-    samples = np.asarray(audio).squeeze()
-    if samples.ndim != 1:
-        raise ValueError("Unexpected audio shape returned by the model.")
+def audio_to_wav(audio):
+    samples = np.asarray(audio, dtype=np.float32).reshape(-1)
+    samples = np.nan_to_num(samples)
     samples = np.clip(samples, -1.0, 1.0)
     pcm = (samples * 32767).astype(np.int16)
+
     output = io.BytesIO()
-    with wave.open(output, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sample_rate)
-        wf.writeframes(pcm.tobytes())
+    with wave.open(output, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(SAMPLE_RATE)
+        wav_file.writeframes(pcm.tobytes())
+
     return output.getvalue()
 
-if st.button("Generate conversation audio", type="primary", use_container_width=True):
+def parse_script(script):
+    turns = []
+
+    for line_no, line in enumerate(script.splitlines(), start=1):
+        line = line.strip()
+
+        if not line:
+            continue
+
+        match = re.match(r"^([AB])\s*:\s*(.+)$", line, re.IGNORECASE)
+
+        if not match:
+            raise ValueError(
+                f"Line {line_no}: start the line with A: or B:, "
+                "followed by the words to speak."
+            )
+
+        speaker, text = match.groups()
+        turns.append((speaker.upper(), text.strip()))
+
+    if not turns:
+        raise ValueError("Enter at least one A: or B: line.")
+
+    if len(turns) > 100:
+        raise ValueError("Please use 100 turns or fewer per generation.")
+
+    return turns
+
+def synthesize(tts, text, voice_id, language, speed, steps):
+    style = tts.get_voice_style(voice_name=voice_id)
+
+    audio, _ = tts.synthesize(
+        text=text,
+        voice_style=style,
+        lang=language,
+        speed=speed,
+        total_steps=steps,
+    )
+
+    return audio_to_wav(audio)
+
+if "preview_a" not in st.session_state:
+    st.session_state.preview_a = None
+if "preview_b" not in st.session_state:
+    st.session_state.preview_b = None
+if "final_audio" not in st.session_state:
+    st.session_state.final_audio = None
+
+with st.sidebar:
+    st.header("🎭 Speaker settings")
+
+    label_a = st.selectbox(
+        "Speaker A voice",
+        list(VOICE_OPTIONS.keys()),
+        index=2,
+        key="voice_a_choice",
+    )
+    voice_a = VOICE_OPTIONS[label_a]
+
+    if st.button("🔊 Preview Speaker A", use_container_width=True):
+        try:
+            tts = load_tts()
+            with st.spinner("Generating Speaker A preview..."):
+                st.session_state.preview_a = synthesize(
+                    tts,
+                    "Hello! This is a preview of the voice I selected.",
+                    voice_a,
+                    LANGUAGES[st.session_state.language_choice],
+                    st.session_state.speed_choice,
+                    st.session_state.quality_choice,
+                )
+        except Exception as exc:
+            st.error(f"Speaker A preview failed: {exc}")
+
+    if st.session_state.preview_a:
+        st.audio(st.session_state.preview_a, format="audio/wav")
+
+    st.divider()
+
+    label_b = st.selectbox(
+        "Speaker B voice",
+        list(VOICE_OPTIONS.keys()),
+        index=5,
+        key="voice_b_choice",
+    )
+    voice_b = VOICE_OPTIONS[label_b]
+
+    if st.button("🔊 Preview Speaker B", use_container_width=True):
+        try:
+            tts = load_tts()
+            with st.spinner("Generating Speaker B preview..."):
+                st.session_state.preview_b = synthesize(
+                    tts,
+                    "Hi there! This is a preview of my selected voice.",
+                    voice_b,
+                    LANGUAGES[st.session_state.language_choice],
+                    st.session_state.speed_choice,
+                    st.session_state.quality_choice,
+                )
+        except Exception as exc:
+            st.error(f"Speaker B preview failed: {exc}")
+
+    if st.session_state.preview_b:
+        st.audio(st.session_state.preview_b, format="audio/wav")
+
+    st.divider()
+    st.header("⚙️ Audio settings")
+
+    language_name = st.selectbox(
+        "Language",
+        list(LANGUAGES.keys()),
+        index=0,
+        key="language_choice",
+    )
+
+    speed = st.slider(
+        "Speaking speed",
+        min_value=0.7,
+        max_value=2.0,
+        value=1.0,
+        step=0.1,
+        key="speed_choice",
+    )
+
+    quality = st.select_slider(
+        "Generation quality / steps",
+        options=[5, 6, 8, 10, 12],
+        value=5,
+        key="quality_choice",
+        help="Lower values are faster; higher values may improve quality.",
+    )
+
+    pause = st.slider(
+        "Pause between speakers (seconds)",
+        0.0,
+        2.0,
+        0.3,
+        0.1,
+    )
+
+st.subheader("📝 Conversation script")
+
+script = st.text_area(
+    "Enter one speaker turn per line",
+    value=DEFAULT_SCRIPT,
+    height=240,
+    help="Use A: for Speaker A and B: for Speaker B.",
+)
+
+st.code("A: Hello! How are you?\nB: I'm doing well, thanks!\nA: What are you doing today?", language="text")
+
+if st.button("🎙️ Generate complete conversation", type="primary", use_container_width=True):
     try:
         turns = parse_script(script)
-        if len(turns) > 100:
-            st.error("Please limit each generation to 100 turns.")
-            st.stop()
-
         tts = load_tts()
         audio_parts = []
+
         progress = st.progress(0)
         status = st.empty()
 
-        for index, (speaker, text) in enumerate(turns):
-            status.write(f"Generating turn {index + 1}/{len(turns)} — Speaker {speaker}")
-            voice = voice_a if speaker == "A" else voice_b
-            style = tts.get_voice_style(voice_name=voice)
-            audio, _ = tts.synthesize(
-                text,
-                voice_style=style,
-                lang=language,
-                speed=speed,
+        for index, (speaker, words) in enumerate(turns):
+            status.write(
+                f"Generating turn {index + 1}/{len(turns)} — Speaker {speaker}"
             )
-            samples = np.asarray(audio, dtype=np.float32).squeeze()
-            if samples.ndim != 1:
-                raise ValueError(f"Unexpected audio shape at turn {index + 1}.")
+
+            voice_id = voice_a if speaker == "A" else voice_b
+
+            style = tts.get_voice_style(voice_name=voice_id)
+            audio, _ = tts.synthesize(
+                text=words,
+                voice_style=style,
+                lang=LANGUAGES[language_name],
+                speed=speed,
+                total_steps=quality,
+            )
+
+            samples = np.asarray(audio, dtype=np.float32).reshape(-1)
             audio_parts.append(samples)
+
             if index < len(turns) - 1 and pause > 0:
-                audio_parts.append(
-                    np.zeros(int(44100 * pause), dtype=np.float32)
+                silence = np.zeros(
+                    int(SAMPLE_RATE * pause), dtype=np.float32
                 )
+                audio_parts.append(silence)
+
             progress.progress((index + 1) / len(turns))
 
         combined = np.concatenate(audio_parts)
-        result = wav_bytes(combined)
+        st.session_state.final_audio = audio_to_wav(combined)
 
-        status.success("Conversation audio is ready!")
-        st.audio(result, format="audio/wav")
-        st.download_button(
-            "⬇️ Download complete conversation (WAV)",
-            data=result,
-            file_name="conversation.wav",
-            mime="audio/wav",
-            use_container_width=True,
-        )
-        st.caption(f"Generated {len(turns)} turns.")
-
+        status.success(f"Done! Generated all {len(turns)} turns.")
     except Exception as exc:
-        st.error(f"Generation failed: {exc}")
-        st.info("If the model failed to load, check the deployment logs.")
+        st.error(f"Audio generation failed: {exc}")
+
+if st.session_state.final_audio:
+    st.subheader("🎧 Your complete conversation")
+    st.audio(st.session_state.final_audio, format="audio/wav")
+
+    st.download_button(
+        "⬇️ Download complete conversation",
+        data=st.session_state.final_audio,
+        file_name="supertonic_conversation.wav",
+        mime="audio/wav",
+        type="primary",
+        use_container_width=True,
+    )
